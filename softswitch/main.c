@@ -57,6 +57,11 @@ struct dataplane {
     struct port *ports;
 } dataplane;
 
+struct pushpop {
+    void* data;
+    unsigned len;
+} pushpop;
+
 static sig_atomic_t sigint = 0;
 
 union frame_map {
@@ -326,11 +331,48 @@ unsigned long long random_dpid() {
     return dpid & 0xFFFFFFFFFFFFFFFFULL;
 }
 
+void pop_header(int len){
+    pushpop.data = NULL;
+    pushpop.len = len;
+}
+
+void push_header(int len, void* data){
+    pushpop.data = data;
+    pushpop.len = len;
+}
+
 // flags is the hack to force transmission
 void transmit(struct metadatahdr *buf, int len, uint32_t port, int flags) {
     int i;
     void *eth_frame = (uint8_t *)buf + sizeof(struct metadatahdr);
     int eth_len = len - sizeof(struct metadatahdr);
+    void *enc_eth_frame = NULL;
+
+    // Check if we need to perform encap/decap
+    if(pushpop.len > 0){
+        if(pushpop.data == NULL){ // pop
+            eth_frame += pushpop.len;
+            eth_len -= pushpop.len;
+        }else{ // push
+            // Need to allocate new memory space, copy the data and update eth_frame
+            enc_eth_frame = malloc(len*sizeof(char));
+
+            // Copy encapsulation
+            memmove(enc_eth_frame,pushpop.data,pushpop.len);
+            // Copy original packet
+            memmove(enc_eth_frame+pushpop.len,eth_frame,eth_len);
+            
+            // What's the impact on performance?
+            //free(eth_frame); 
+            
+            eth_frame = enc_eth_frame;
+            eth_len += pushpop.len;
+        }
+
+        // Reset pushpop struct 
+        pushpop.data = NULL;
+        pushpop.len = 0;
+    }
 
     switch (port) {
         case FLOOD:
@@ -386,6 +428,9 @@ int main(int argc, char **argv)
     dataplane.ports = calloc(dataplane.port_count, sizeof(struct port));
 
     /* */
+    pushpop.len = 0;
+    pushpop.data = NULL;
+    /* */
     struct pollfd pfds[dataplane.port_count];
 
     // signal(SIGINT, sighandler);
@@ -415,7 +460,8 @@ int main(int argc, char **argv)
         .controller = arguments.controller
     };
 
-    agent_start(&ubpf_fn, (tx_packet_fn)transmit, &options);
+
+    agent_start(&ubpf_fn, (tx_packet_fn)transmit, (pop_header_fn) pop_header, (push_header_fn) push_header , &options);
 
     //
     union frame_map ppd;

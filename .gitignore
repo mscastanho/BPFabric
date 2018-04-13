@@ -4,6 +4,8 @@
 *.o.cmd
 *.a
 
+.vscode
+
 softswitch/softswitch
 
 protocol/src/c

@@ -633,6 +633,14 @@ check_all_ports_link_status(uint8_t port_num, uint32_t port_mask)
     }
 }
 
+void pop_header(int len){
+    // TODO
+}
+
+void push_header(int len, void* data){
+    // TODO
+}
+
 int
 main(int argc, char **argv)
 {
@@ -805,7 +813,8 @@ main(int argc, char **argv)
         .dpid = dpid,
         .controller = controller
     };
-    agent_start(&ubpf_fn, (tx_packet_fn)transmit, &opts);
+
+    agent_start(&ubpf_fn, (tx_packet_fn)transmit, (pop_header_fn) pop_header, (push_header_fn) push_header, &opts);
 
     /* launch per-lcore init on every lcore */
     rte_eal_mp_remote_launch(l2fwd_launch_one_lcore, NULL, CALL_MASTER);

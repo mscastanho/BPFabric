@@ -38,8 +38,9 @@ typedef int (*handler)(void* buffer, Header *header);
 struct agent {
     int fd;
     ubpf_jit_fn *ubpf_fn;
-    tx_packet_fn transmit;
-
+    tx_packet_fn transmit; 
+    pop_header_fn pop_header;
+    push_header_fn push_header;
     struct agent_options *options;
 } agent;
 
@@ -552,6 +553,10 @@ void *agent_task()
     ubpf_register(vm, 31, "bpf_notify", bpf_notify);
     ubpf_register(vm, 32, "bpf_debug", bpf_debug);
 
+    // Register encapsulation functions
+    ubpf_register(vm, 41, "bpf_pop_header", agent.pop_header);
+    ubpf_register(vm, 42, "bpf_push_header", agent.push_header);
+
     while (likely(!sigint)) {
         // Connect to the controller
         agent.fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -610,7 +615,7 @@ void *agent_task()
     pthread_exit(NULL);
 }
 
-int agent_start(ubpf_jit_fn *ubpf_fn, tx_packet_fn tx_fn, struct agent_options *opts)
+int agent_start(ubpf_jit_fn *ubpf_fn, tx_packet_fn tx_fn, pop_header_fn pop_fn, push_header_fn push_fn, struct agent_options *opts)
 {
     int err;
     pthread_t agent_thread;
@@ -618,6 +623,8 @@ int agent_start(ubpf_jit_fn *ubpf_fn, tx_packet_fn tx_fn, struct agent_options *
     agent.ubpf_fn = ubpf_fn;
     agent.transmit = tx_fn;
     agent.options = opts;
+    agent.pop_header = pop_fn;
+    agent.push_header = push_fn;
 
     err = pthread_create(&agent_thread, NULL, agent_task, NULL);
     return err;

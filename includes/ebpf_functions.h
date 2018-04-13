@@ -6,5 +6,7 @@ static int (*bpf_map_update_elem)(void *map, void *key, void *value, unsigned lo
 static int (*bpf_map_delete_elem)(void *map, void *key) = (void *) 3;
 static void *(*bpf_notify)(int id, void *data, int len) = (void *) 31;
 static void *(*bpf_debug)(char *) = (void *) 32;
+static void *(*bpf_pop_header)(unsigned len) = (void *) 41;
+static void *(*bpf_push_header)(unsigned len, void* data) = (void *) 42;
 
 #endif
