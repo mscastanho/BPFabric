@@ -58,9 +58,8 @@ struct dataplane {
 } dataplane;
 
 struct pushpop {
-    void* data;
-    unsigned len;
-} pushpop;
+	uint16_t new_pkt_len;
+}pushpop;
 
 static sig_atomic_t sigint = 0;
 
@@ -331,14 +330,32 @@ unsigned long long random_dpid() {
     return dpid & 0xFFFFFFFFFFFFFFFFULL;
 }
 
-void pop_header(int len){
-    pushpop.data = NULL;
-    pushpop.len = len;
+void pop_header(struct packet *pkt, int offset, int encap_len){
+    char* eth_frame = (( (char*) pkt ) + sizeof(struct metadatahdr));
+    memmove(eth_frame + offset,eth_frame + offset + encap_len,pkt->metadata.length-offset);
+	pkt->metadata.length -= encap_len;
+	pushpop.new_pkt_len = pkt->metadata.length;
 }
 
-void push_header(int len, void* data){
-    pushpop.data = data;
-    pushpop.len = len;
+void push_header(struct packet *pkt, int offset, int encap_len, void *data){
+	//printf("Received a push_header call!!\npkt: %p\noffset: %d\nencap_len: %d\ndata: %p\n\n",pkt,offset,encap_len,data);
+    
+    char* eth_frame = (( (char*) pkt ) + sizeof(struct metadatahdr));
+
+	// TODO: check MTU violation
+    //if(pkt->metadata.length + encap_len > 2048)
+        //return 1; // Error
+   
+	// Make room for encapsulation
+	memmove(eth_frame + offset + encap_len, eth_frame + offset, pkt->metadata.length-offset);
+
+	// Copy encapsulation
+	memmove(eth_frame + offset, (char*) data, encap_len);
+	pkt->metadata.length += encap_len;
+	pushpop.new_pkt_len = pkt->metadata.length;
+
+   //return 0;
+
 }
 
 // flags is the hack to force transmission
@@ -348,30 +365,10 @@ void transmit(struct metadatahdr *buf, int len, uint32_t port, int flags) {
     int eth_len = len - sizeof(struct metadatahdr);
     void *enc_eth_frame = NULL;
 
-    // Check if we need to perform encap/decap
-    if(pushpop.len > 0){
-        if(pushpop.data == NULL){ // pop
-            eth_frame += pushpop.len;
-            eth_len -= pushpop.len;
-        }else{ // push
-            // Need to allocate new memory space, copy the data and update eth_frame
-            enc_eth_frame = malloc(len*sizeof(char));
-
-            // Copy encapsulation
-            memmove(enc_eth_frame,pushpop.data,pushpop.len);
-            // Copy original packet
-            memmove(enc_eth_frame+pushpop.len,eth_frame,eth_len);
-            
-            // What's the impact on performance?
-            //free(eth_frame); 
-            
-            eth_frame = enc_eth_frame;
-            eth_len += pushpop.len;
-        }
-
-        // Reset pushpop struct 
-        pushpop.data = NULL;
-        pushpop.len = 0;
+    // Check if we performed encap/decap
+    if(pushpop.new_pkt_len != 0){
+        eth_len = pushpop.new_pkt_len;
+        pushpop.new_pkt_len = 0; // Reset flag
     }
 
     switch (port) {
@@ -428,8 +425,7 @@ int main(int argc, char **argv)
     dataplane.ports = calloc(dataplane.port_count, sizeof(struct port));
 
     /* */
-    pushpop.len = 0;
-    pushpop.data = NULL;
+    pushpop.new_pkt_len = 0;
     /* */
     struct pollfd pfds[dataplane.port_count];
 

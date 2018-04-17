@@ -633,11 +633,11 @@ check_all_ports_link_status(uint8_t port_num, uint32_t port_mask)
     }
 }
 
-void pop_header(int len){
+void pop_header(struct packet *pkt, int offset, int encap_len){
     // TODO
 }
 
-void push_header(int len, void* data){
+void push_header(struct packet *pkt, int offset, int encap_len, void *data){
     // TODO
 }
 
