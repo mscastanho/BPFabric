@@ -1,5 +1,10 @@
 #include <linux/if_ether.h>
+#include <string.h>
+#include <stdlib.h>
+#include <netinet/ip.h>
+#include <netinet/in.h>
 #include "ebpf_switch.h"
+
 
 struct bpf_map_def SEC("maps") inports = {
     .type = BPF_MAP_TYPE_HASH,
@@ -8,12 +13,23 @@ struct bpf_map_def SEC("maps") inports = {
     .max_entries = 256,
 };
 
+
 uint64_t prog(struct packet *pkt)
 {
-    struct ethhdr *eth = (struct ethhdr *) (( (char*) pkt ) + sizeof(struct metadatahdr));
+    struct ethhdr *eth = (struct ethhdr *) (( (char*) pkt ) + sizeof(struct metadatahdr));	
+	struct iphdr outer_ip, *ip;
 
-    // Theoretically, will push a new ethernet header equal to the original one
-    bpf_push_header(sizeof(struct ethhdr),eth);
+	if(eth->h_proto == 0x0008) // If IP packet...
+	{
+		eth->h_proto = 0xAAAA; // Signal it is encapsulated
+		ip = (struct iphdr *) (((char*) eth) + sizeof(struct ethhdr));
+		memmove(&outer_ip,ip,sizeof(struct iphdr));
+
+    	bpf_push_header(pkt,sizeof(struct ethhdr),sizeof(struct iphdr),&outer_ip);			
+	}else if (eth->h_proto == 0xAAAA){
+		bpf_pop_header(pkt,sizeof(struct ethhdr),sizeof(struct iphdr));
+		eth->h_proto = 0x0008;
+	}
 
     uint32_t *out_port;
 
