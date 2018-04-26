@@ -331,37 +331,28 @@ unsigned long long random_dpid() {
 }
 
 void pop_header(struct packet *pkt, int offset, int encap_len){
-	//clock_t t;
-	//t = clock();
-
     char* eth_frame = (( (char*) pkt ) + sizeof(struct metadatahdr));
 
 	// Edge case
 	if(offset >= pkt->metadata.length || encap_len >= pkt->metadata.length){
 		printf("Error, packet too short\n");
-		return;	
+		return;
 	}
+
     memmove(eth_frame + offset,eth_frame + offset + encap_len,pkt->metadata.length-offset);
 	pkt->metadata.length -= encap_len;
 	pushpop.new_pkt_len = pkt->metadata.length;
-	
-	//t = clock() - t;
-	//printf("{%llu,pop,%.3f}\n",dataplane.dpid,(1000000.0*(float)t)/CLOCKS_PER_SEC);
 }
 
 void push_header(struct packet *pkt, int offset, int encap_len, void *data){
-	//clock_t t;
-	//t = clock();
-	
-	//printf("Received a push_header call!!\npkt: %p\noffset: %d\nencap_len: %d\ndata: %p\n\n",pkt,offset,encap_len,data);
     char* eth_frame = (( (char*) pkt ) + sizeof(struct metadatahdr));
 
 	// Check MTU violation
     if(pkt->metadata.length + encap_len > 2048){
-		printf("Error, exceeded MTU size\n");    
+		printf("Error, exceeded MTU size\n");
 	    return; // Error
 	}
-   
+
 	// Make room for encapsulation
 	memmove(eth_frame + offset + encap_len, eth_frame + offset, pkt->metadata.length-offset);
 
@@ -369,11 +360,6 @@ void push_header(struct packet *pkt, int offset, int encap_len, void *data){
 	memmove(eth_frame + offset, (char*) data, encap_len);
 	pkt->metadata.length += encap_len;
 	pushpop.new_pkt_len = pkt->metadata.length;
-	
-	//t = clock() - t;
-	//printf("{%llu,push,%.3f}\n",dataplane.dpid,(1000000.0*(float)t)/CLOCKS_PER_SEC);
-   //return 0;
-
 }
 
 // flags is the hack to force transmission

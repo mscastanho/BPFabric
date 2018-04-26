@@ -16,8 +16,8 @@ struct bpf_map_def SEC("maps") inports = {
 
 uint64_t prog(struct packet *pkt)
 {
-    struct ethhdr *eth = (struct ethhdr *) (( (char*) pkt ) + sizeof(struct metadatahdr));	
-	struct iphdr outer_ip, *ip;
+    struct ethhdr *eth = (struct ethhdr *) (( (char*) pkt ) + sizeof(struct metadatahdr));
+    struct iphdr outer_ip, *ip;
 
 	if(eth->h_proto == 0x0008) // If IP packet...
 	{
@@ -25,8 +25,8 @@ uint64_t prog(struct packet *pkt)
 		ip = (struct iphdr *) (((char*) eth) + sizeof(struct ethhdr));
 		memmove(&outer_ip,ip,sizeof(struct iphdr));
 
-    	bpf_push_header(pkt,sizeof(struct ethhdr),sizeof(struct iphdr),&outer_ip);			
-	}else if (eth->h_proto == 0xAAAA){
+        bpf_push_header(pkt,sizeof(struct ethhdr),sizeof(struct iphdr),&outer_ip);
+	}else if (eth->h_proto == 0xAAAA){ // If encapsulated IP packet...
 		bpf_pop_header(pkt,sizeof(struct ethhdr),sizeof(struct iphdr));
 		eth->h_proto = 0x0008;
 	}

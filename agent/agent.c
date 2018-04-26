@@ -38,7 +38,7 @@ typedef int (*handler)(void* buffer, Header *header);
 struct agent {
     int fd;
     ubpf_jit_fn *ubpf_fn;
-    tx_packet_fn transmit; 
+    tx_packet_fn transmit;
     pop_header_fn pop_header;
     push_header_fn push_header;
     struct agent_options *options;
