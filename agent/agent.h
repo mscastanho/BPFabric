@@ -1,11 +1,9 @@
 #ifndef AGENT_H
 #define AGENT_H
 
-#include "ebpf_consts.h"
-
 typedef void (*tx_packet_fn)(void *buf, int len, uint64_t out_port, int flags);
-typedef void (*pop_header_fn)(struct packet *pkt, int offset, int encap_len);
-typedef void (*push_header_fn)(struct packet *pkt, int offset, int encap_len, void* data);
+typedef void (*pop_header_fn)(void *pkt, int offset, int encap_len);
+typedef void (*push_header_fn)(void *pkt, int offset, int encap_len, void* data);
 
 struct agent_options {
     uint64_t dpid;
