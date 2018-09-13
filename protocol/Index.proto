@@ -1,0 +1,4 @@
+enum Index {
+    SF = 0;
+    FWD = 1;
+}

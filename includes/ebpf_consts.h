@@ -14,12 +14,13 @@ struct metadatahdr { // limited to the size available between the TPACKET_V2 hea
     uint32_t sec;
     uint32_t nsec;
     uint16_t length;
+    // uint64_t id;
 } __attribute__((packed));
 
 
 struct packet {
-    struct metadatahdr metadata;
-    struct ethhdr eth;
+    struct metadatahdr *metadata;
+    struct ethhdr *eth;
 };
 
 #endif

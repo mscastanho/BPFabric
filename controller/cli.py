@@ -46,51 +46,82 @@ def tabulate(rows, headers=None):
     print(row_format.format(*row_delim))
 
 class SwitchTableCli(cmd.Cmd):
-    def __init__(self, connection, table_name):
+    def __init__(self, connection, index, table_name):
         cmd.Cmd.__init__(self)
         self.connection = connection
         self.table_name = table_name
+        self.index = index
 
     def do_list(self, line):
-        self.connection.send(TableListRequest(table_name=self.table_name))
+        self.connection.send(TableListRequest(index=self.index,table_name=self.table_name))
 
     def do_get(self, line):
-        self.connection.send(TableEntryGetRequest(table_name=self.table_name, key=line.decode('hex')))
+        self.connection.send(TableEntryGetRequest(index=self.index,table_name=self.table_name, key=line.decode('hex')))
 
     def do_update(self, line):
         args = line.split()
-        self.connection.send(TableEntryInsertRequest(table_name=self.table_name, key=args[0].decode('hex'), value=args[1].decode('hex')))
+        self.connection.send(TableEntryInsertRequest(index=self.index,table_name=self.table_name, key=args[0].decode('hex'), value=args[1].decode('hex')))
 
     def do_delete(self, line):
-        self.connection.send(TableEntryDeleteRequest(table_name=self.table_name, key=line.decode('hex')))
+        self.connection.send(TableEntryDeleteRequest(index=self.index,table_name=self.table_name, key=line.decode('hex')))
 
     def emptyline(self):
          self.do_help(None)
 
 class SwitchCLI(cmd.Cmd):
+    def valid_idx(self, index):
+        if index == 'SF' or index == 'FWD':
+            return True
+        else:
+            return False
+        #return index in Index.__members__
+
     def __init__(self, connection):
         cmd.Cmd.__init__(self)
         self.connection = connection
 
     def do_tables(self, line):
-        self.connection.send(TablesListRequest())
+        args = line.split()
+        if len(args) != 1:
+            print 'Wrong number of arguments'
+            return
+        
+        self.connection.send(TablesListRequest(index=args[0]))
 
     def do_table(self, line):
         args = line.split()
-        if len(args) == 0:
-            print 'Missing table name'
+        if len(args) != 3:
+            print 'Wrong number of arguments'
             return
 
-        SwitchTableCli(self.connection, args[0]).onecmd(' '.join(args[1:]))
+        index = args[0]
+        if not self.valid_idx(index):
+            print 'Invalid index'
+            return
 
-    def do_install(self, path):
+        # print str(args)
+        SwitchTableCli(self.connection, args[0], args[1]).onecmd(' '.join(args[2:]))
+
+    def do_install(self, args):
+        args = args.split()
+        if len(args) != 2:
+            print 'Wrong number of arguments'
+            return
+        
+        index = args[0]
+        if not self.valid_idx(index):
+            print 'Invalid index'
+            return
+
+        path = args[1]
+
         if not os.path.isfile(path):
             print 'Invalid file path'
             return
 
         with open(path, 'rb') as f:
             elf = f.read()
-            self.connection.send(InstallRequest(elf=elf))
+            self.connection.send(InstallRequest(elf=elf,index=index))
 
     def emptyline(self):
          self.do_help(None)
@@ -114,6 +145,7 @@ class MainCLI(cmd.Cmd):
                 dpid = int(args[0], 16)
 
                 if dpid in self.application.connections:
+                    # print "This is the command: " + ' '.join(args[1:])
                     SwitchCLI(self.application.connections[dpid]).onecmd(' '.join(args[1:]))
                 else:
                     print 'Switch with dpid {} is not connected.'.format(dpid)

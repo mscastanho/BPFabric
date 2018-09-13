@@ -4,6 +4,9 @@
 *.o.cmd
 *.a
 
+.vscode
+.gitignore
+
 softswitch/softswitch
 
 protocol/src/c

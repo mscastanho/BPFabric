@@ -21,10 +21,11 @@ class eBPFHost(Host):
 class eBPFSwitch(Switch):
     dpid = 1
 
-    def __init__(self, name, switch_path='softswitch', dpid=None, **kwargs):
+    def __init__(self, name, switch_path='softswitch', dpid=None, controller=None, address=None, type='SW',**kwargs):
         Switch.__init__(self, name, **kwargs)
 
         self.switch_path = switch_path
+        # print 'This is the path ' + self.switch_path
 
         if dpid:
             self.dpid = dpid
@@ -32,6 +33,10 @@ class eBPFSwitch(Switch):
         else:
             self.dpid = eBPFSwitch.dpid
             eBPFSwitch.dpid += 1
+
+        self.type = type
+        self.controller = controller
+        self.address = address
 
     @classmethod
     def setup(cls):
@@ -43,13 +48,20 @@ class eBPFSwitch(Switch):
         args = [self.switch_path]
 
         args.extend(['--dpid', str(self.dpid)])
+        args.extend(['--type', str(self.type)])
+    
+        if self.address:
+            args.extend(['--address', str(self.address)])
+
+        if self.controller:
+            args.extend(['--controller', str(self.controller)])
 
         for port, intf in self.intfs.items():
             if not intf.IP():
                 args.append(intf.name)
 
         print ' '.join(args) + ' &'
-
+        
         self.proc = subprocess.Popen(args)
 
     def stop(self):

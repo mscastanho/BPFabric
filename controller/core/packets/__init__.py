@@ -10,3 +10,4 @@ from Table_pb2 import TablesListRequest, TablesListReply, TableListRequest, \
     TableEntryDeleteReply, TableDefinition
 from Packet_pb2 import PacketIn, PacketOut
 from Notify_pb2 import Notify
+import Index_pb2 as Index

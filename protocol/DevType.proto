@@ -1,0 +1,6 @@
+enum DevType {
+    FUNCTION = 0;
+    SWITCH = 1;
+    GATEWAY = 2;
+    UNKNOWN = 3;
+}

@@ -22,6 +22,9 @@
 #include "ubpf.h"
 #include "agent.h"
 #include "ebpf_consts.h"
+#include "sfc_consts.h"
+#include "nsh.h"
+#include "DevType.pb-c.h"
 
 #ifndef likely
     #define likely(x)        __builtin_expect(!!(x), 1)
@@ -36,7 +39,6 @@
 #ifndef __align_tpacket
     #define __align_tpacket(x)    __attribute__((aligned(TPACKET_ALIGN(x))))
 #endif
-
 struct ring {
     struct iovec *rd;
     uint8_t *map;
@@ -55,7 +57,14 @@ struct dataplane {
     unsigned long long dpid;
     int port_count;
     struct port *ports;
+    uint64_t pktid;
+    DevType type;
+    uint8_t address[ETH_ALEN];
 } dataplane;
+
+struct pushpop {
+	uint16_t new_pkt_len;
+}pushpop;
 
 static sig_atomic_t sigint = 0;
 
@@ -232,7 +241,7 @@ int tx_frame(struct port* port, void *data, int len) {
         ppd_out.v2->tp_h.tp_snaplen = len;
         ppd_out.v2->tp_h.tp_len = len;
 
-        // printf("start pointer: %p  tp_mac offset: %d  hdrlen: %d  sockadd_ll: %d\n", ppd.raw, ppd.v2->tp_h.tp_mac, TPACKET2_HDRLEN, sizeof(struct sockaddr_ll));
+        //  printf("start pointer: %p  tp_mac offset: %d  hdrlen: %d  sockadd_ll: %d\n", ppd_out.raw, ppd_out.v2->tp_h.tp_mac, TPACKET2_HDRLEN, sizeof(struct sockaddr_ll));
 
         // Can this be zerocopy too? I guess not with the fixed allocation of rings
         // assert(ppd.v2->tp_h.tp_len == ppd.v2->tp_h.tp_snaplen);
@@ -262,6 +271,8 @@ static struct argp_option options[] = {
     {"verbose",  'v',      0,      0, "Produce verbose output" },
     {"dpid"   ,  'd', "dpid",      0, "Datapath id of the switch"},
     {"controller", 'c', "address", 0, "Controller address default to 127.0.0.1:9000"},
+    {"type", 't', "type",   0, "Device type (switch or service function)"},
+    {"address", 'a', "addr", 0, "MAC address"},
     { 0 }
 };
 
@@ -273,14 +284,28 @@ struct arguments
     int interface_count;
     unsigned long long dpid;
     char *controller;
-
+    DevType type;
     int verbose;
+    uint8_t address[ETH_ALEN];
 };
+
+DevType parse_type(char* arg){
+    if( strcmp(arg,"SF") == 0 )
+        return DEV_TYPE__FUNCTION;
+    else if(strcmp(arg,"SW") == 0)
+        return DEV_TYPE__SWITCH;
+    else if(strcmp(arg,"GW") == 0)
+        return DEV_TYPE__GATEWAY;
+    else
+        return DEV_TYPE__UNKNOWN;
+}
 
 static error_t
 parse_opt(int key, char *arg, struct argp_state *state)
 {
     struct arguments *arguments = state->input;
+    DevType type;
+    int ret;
 
     switch (key)
     {
@@ -296,6 +321,29 @@ parse_opt(int key, char *arg, struct argp_state *state)
             arguments->controller = arg;
             break;
 
+        case 't':
+            type = parse_type(arg);
+
+            if(type == UNKNOWN){
+                printf("ERROR: Unknown device type. Exiting...");
+                exit(1);
+            }else
+                arguments->type = type;
+
+            break;
+        case 'a':
+            ret = sscanf(arg,"%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                &arguments->address[0],
+                &arguments->address[1],
+                &arguments->address[2],
+                &arguments->address[3],
+                &arguments->address[4],
+                &arguments->address[5]);
+            if(ret == EOF){
+                printf("ERROR: Wrong MAC address format...");
+                exit(1);
+            }
+            break;
         case ARGP_KEY_ARG:
             arguments->interfaces[state->arg_num] = arg;
             arguments->interface_count++;
@@ -326,11 +374,52 @@ unsigned long long random_dpid() {
     return dpid & 0xFFFFFFFFFFFFFFFFULL;
 }
 
+void pop_header(struct packet *pkt, int offset, int encap_len){
+    char* eth_frame = (char*) pkt->eth;
+
+    // Edge case
+    if(offset >= pkt->metadata->length || encap_len >= pkt->metadata->length){
+        printf("Error, packet too short\n");
+        return;
+    }
+
+    memmove(eth_frame + offset,eth_frame + offset + encap_len,pkt->metadata->length-offset);
+    pkt->metadata->length -= encap_len;
+    pushpop.new_pkt_len = pkt->metadata->length;
+}
+
+void push_header(struct packet *pkt, int offset, int encap_len, void *data){
+    char* eth_frame = (char*) pkt->eth;
+
+    // Check MTU violation
+    if(pkt->metadata->length + encap_len > 2048){
+        printf("Error, exceeded MTU size\n");
+        return; // Error
+    }
+
+    // Make room for encapsulation
+    memmove(eth_frame + offset + encap_len, eth_frame + offset, pkt->metadata->length-offset);
+
+    // Copy encapsulation
+    memmove(eth_frame + offset, (char*) data, encap_len);
+    pkt->metadata->length += encap_len;
+    pushpop.new_pkt_len = pkt->metadata->length;
+
+    // printf("encapsulating packet...\n");
+}
+
 // flags is the hack to force transmission
 void transmit(struct metadatahdr *buf, int len, uint32_t port, int flags) {
     int i;
     void *eth_frame = (uint8_t *)buf + sizeof(struct metadatahdr);
     int eth_len = len - sizeof(struct metadatahdr);
+    void *enc_eth_frame = NULL;
+
+    // Check if we performed encap/decap
+    if(pushpop.new_pkt_len != 0){
+        eth_len = pushpop.new_pkt_len;
+        pushpop.new_pkt_len = 0; // Reset flag
+    }
 
     switch (port) {
         case FLOOD:
@@ -369,6 +458,18 @@ void transmit(struct metadatahdr *buf, int len, uint32_t port, int flags) {
     }
 }
 
+void print_mac_be(const char* desc, const char* mac){
+    
+    printf("%s : %02x:%02x:%02x:%02x:%02x:%02x\n",
+            desc,
+            mac[5],
+            mac[4],
+            mac[3],
+            mac[2],
+            mac[1],
+            mac[0]);
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -378,13 +479,38 @@ int main(int argc, char **argv)
     arguments.interface_count = 0;
     arguments.dpid = random_dpid();
     arguments.controller = "127.0.0.1:9000";
+    arguments.type = SWITCH; // switch type is the default
+    
+    arguments.address[0] = 0;
+    arguments.address[1] = 0;
+    arguments.address[2] = 0;
+    arguments.address[3] = 0;
+    arguments.address[4] = 0;
+    arguments.address[5] = 0;
+    
     argp_parse(&argp, argc, argv, 0, 0, &arguments);
+
+    printf("Controller address set to: %s\n",arguments.controller);
 
     /* */
     dataplane.dpid = arguments.dpid;
     dataplane.port_count = arguments.interface_count;
     dataplane.ports = calloc(dataplane.port_count, sizeof(struct port));
+    dataplane.pktid = 0;
+    dataplane.type = arguments.type;
+    memcpy(dataplane.address,arguments.address,ETH_ALEN);
 
+    // printf("MAC address %02x:%02x:%02x:%02x:%02x:%02x\n",
+    //             dataplane.address[5],
+    //             dataplane.address[4],
+    //             dataplane.address[3],
+    //             dataplane.address[2],
+    //             dataplane.address[1],
+    //             dataplane.address[0]);
+
+    print_mac_be("MAC address",dataplane.address);
+    /* */
+    pushpop.new_pkt_len = 0;
     /* */
     struct pollfd pfds[dataplane.port_count];
 
@@ -393,7 +519,7 @@ int main(int argc, char **argv)
     signal(SIGKILL, sighandler);
 
     /* setup all the interfaces */
-    printf("Setting up %d interfaces\n", dataplane.port_count);
+    printf("(%llu) Setting up %d interfaces\n", dataplane.dpid, dataplane.port_count);
     for (i = 0; i < dataplane.port_count; i++) {
         // Create the socket, allocate the tx and rx rings and create the frame io vectors
         setup_socket(&dataplane.ports[i], arguments.interfaces[i]);
@@ -404,21 +530,26 @@ int main(int argc, char **argv)
         pfds[i].revents = 0;
 
         //
-        printf("Interface %s, index %d, fd %d\n", arguments.interfaces[i], i, dataplane.ports[i].fd);
+        printf("(%llu) Interface %s, index %d, fd %d\n", dataplane.dpid, arguments.interfaces[i], i, dataplane.ports[i].fd);
     }
     printf("\n");
 
     /* */
-    ubpf_jit_fn ubpf_fn = NULL;
+    ubpf_jit_fn ubpf_fn[MAX_FUNCS], fn;
+    for(i = 0 ; i < MAX_FUNCS ; i++)
+        ubpf_fn[i] = NULL;
+
     struct agent_options options = {
         .dpid = dataplane.dpid,
         .controller = arguments.controller
     };
 
-    agent_start(&ubpf_fn, (tx_packet_fn)transmit, &options);
+
+    agent_start(ubpf_fn, (tx_packet_fn)transmit, (pop_header_fn) pop_header, (push_header_fn) push_header , &options);
 
     //
     union frame_map ppd;
+    uint64_t ret = DROP; //default value
 
     while (likely(!sigint)) {
         //
@@ -438,13 +569,66 @@ int main(int argc, char **argv)
                 metadatahdr->sec = ppd.v2->tp_h.tp_sec;
                 metadatahdr->nsec = ppd.v2->tp_h.tp_nsec;
                 metadatahdr->length = (uint16_t)ppd.v2->tp_h.tp_len;
+                // metadatahdr->id = dataplane.pktid++;
 
-                /* Here we have the packet and we can do whatever we want with it */
-                if (ubpf_fn != NULL) {
-                    uint64_t ret = ubpf_fn(metadatahdr, ppd.v2->tp_h.tp_len + sizeof(struct metadatahdr));
-                    // printf("bpf return value %lu\n", ret);
-                    transmit(metadatahdr, ppd.v2->tp_h.tp_len + sizeof(struct metadatahdr), (uint32_t)ret, 0);
+                // 0 -> proxy
+                // 1 -> sf
+                // 2 -> fwd
+                
+                struct packet pkt = {.metadata = metadatahdr, .eth = (struct ethhdr *) ((uint8_t *)metadatahdr + sizeof(struct metadatahdr))};
+                // hexDump("== Packet from SW ==",pkt.eth,pkt.metadata.length);
+                //void* p = (uint8_t *)metadatahdr + sizeof(struct metadatahdr);
+
+                // if(ubpf_fn[0] != NULL){
+                //     ret = ubpf_fn[0]((void*) &pkt,sizeof(struct packet));
+                //     // printf("(%llu) ret =  0x%8" PRIx64 "...\n",dataplane.dpid,ret);
+                // }
+
+                switch(dataplane.type){
+                    case DEV_TYPE__FUNCTION:
+                        if(ntohs(pkt.eth->h_proto) == ETH_P_NSH && 
+                            ubpf_fn[SF_VM] != NULL && 
+                            ubpf_fn[FWD_VM] != NULL &&
+                            memcmp(dataplane.address,pkt.eth->h_dest,ETH_ALEN) == 0){
+
+                            // Size of outer encapsulation: Ethernet + NSH
+                            unsigned int encap_size = ETH_HLEN + NSH_HLEN_NO_META;
+                
+                            // "Remove" encapsulation
+                            pkt.eth = (struct ethhdr *) ((uint8_t *)pkt.eth + encap_size);
+                            pkt.metadata->length -= encap_size;
+                            
+                            // sf processing
+                            ubpf_fn[SF_VM](&pkt,sizeof(struct packet));
+                            
+                            // forwarding
+                            // "Insert" encapsulation again
+                            pkt.eth = (struct ethhdr *) ((uint8_t *)pkt.eth - encap_size);
+                            pkt.metadata->length += encap_size;
+                            ret = ubpf_fn[FWD_VM](&pkt, sizeof(struct packet));
+                            memcpy(pkt.eth->h_source,dataplane.address,ETH_ALEN);
+                        }else{
+                            // Packets not encapsulated with NSH will just be dropped
+                            ret = DROP;
+                        }
+                        break;
+                    case DEV_TYPE__SWITCH:
+                        if(ubpf_fn[0] != NULL){
+                            ret = ubpf_fn[0](&pkt, sizeof(struct packet));
+                        }
+                        break;
+                    case DEV_TYPE__GATEWAY:
+                        if(ubpf_fn[0] != NULL && ubpf_fn[1] != NULL){
+                            ubpf_fn[0](&pkt,sizeof(struct packet));
+                            ret = ubpf_fn[1](&pkt, sizeof(struct packet));
+                        }
+                        break;
+                    default:
+                        ret = DROP;
                 }
+
+                // Default value of ret is DROP
+                transmit(metadatahdr, ppd.v2->tp_h.tp_len + sizeof(struct metadatahdr), (uint32_t)ret, 0);
 
                 // Frame has been used, release the buffer space
                 v2_rx_user_ready(ppd.raw);

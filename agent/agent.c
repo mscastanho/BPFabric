@@ -21,8 +21,10 @@
 #include "Table.pb-c.h"
 #include "Packet.pb-c.h"
 #include "Notify.pb-c.h"
+#include "Index.pb-c.h"
 
 #include "agent.h"
+#include "sfc_consts.h"
 
 #ifndef likely
     #define likely(x)        __builtin_expect(!!(x), 1)
@@ -37,13 +39,66 @@ typedef int (*handler)(void* buffer, Header *header);
 
 struct agent {
     int fd;
-    ubpf_jit_fn *ubpf_fn;
+    ubpf_jit_fn *ubpf_fn; // array of bpf functions
     tx_packet_fn transmit;
-
+    pop_header_fn pop_header;
+    push_header_fn push_header;
     struct agent_options *options;
 } agent;
 
-struct ubpf_vm *vm;
+struct ubpf_vm *vm[MAX_FUNCS];
+
+void hexDump (char *desc, void *addr, int len) {
+    int i;
+    unsigned char buff[17];
+    unsigned char *pc = (unsigned char*)addr;
+
+    // Output description if given.
+    if (desc != NULL)
+        printf ("%s:\n", desc);
+
+    if (len == 0) {
+        printf("  ZERO LENGTH\n");
+        return;
+    }
+    if (len < 0) {
+        printf("  NEGATIVE LENGTH: %i\n",len);
+        return;
+    }
+
+    // Process every byte in the data.
+    for (i = 0; i < len; i++) {
+        // Multiple of 16 means new line (with line offset).
+
+        if ((i % 16) == 0) {
+            // Just don't print ASCII for the zeroth line.
+            if (i != 0)
+                printf ("  %s\n", buff);
+
+            // Output the offset.
+            printf ("  %04x ", i);
+        }
+
+        // Now the hex code for the specific character.
+        printf (" %02x", pc[i]);
+
+        // And store a printable ASCII character for later.
+        if ((pc[i] < 0x20) || (pc[i] > 0x7e))
+            buff[i % 16] = '.';
+        else
+            buff[i % 16] = pc[i];
+        buff[(i % 16) + 1] = '\0';
+    }
+
+    // Pad out last line if not exactly 16 characters.
+    while ((i % 16) != 0) {
+        printf ("   ");
+        i++;
+    }
+
+    // And print the final ASCII bit.
+    printf ("  %s\n", buff);
+}
 
 void send_hello()
 {
@@ -97,7 +152,7 @@ int recv_install(void *buffer, Header *header)
     //
     int err;
     char *errmsg;
-    err = ubpf_load_elf(vm, request->elf.data, request->elf.len, &errmsg);
+    err = ubpf_load_elf(vm[request->index], request->elf.data, request->elf.len, &errmsg);
 
     if (err != 0) {
         printf("Error message: %s\n", errmsg);
@@ -106,7 +161,7 @@ int recv_install(void *buffer, Header *header)
 
     // On x86-64 architectures use the JIT compiler, otherwise fallback to the interpreter
     #if __x86_64__
-        ubpf_jit_fn ebpfprog = ubpf_compile(vm, &errmsg);
+        ubpf_jit_fn ebpfprog = ubpf_compile(vm[request->index], &errmsg);
     #else
         ubpf_jit_fn ebpfprog = ebpf_exec;
     #endif
@@ -116,12 +171,52 @@ int recv_install(void *buffer, Header *header)
         free(errmsg);
     }
 
-    *(agent.ubpf_fn) = ebpfprog;
+    agent.ubpf_fn[request->index] = ebpfprog;
 
-    //TODO should send a InstallReply
+    // //Print SFs
+    // int i;
+    // char name[4];
 
-    //
+    // for(i = 0 ; i < MAX_FUNCS ; i++){
+
+    //     switch(i){
+    //         case INDEX__FWD:
+    //             sprintf(name,"FWD");
+    //             break;
+    //         case INDEX__SF:
+    //             sprintf(name,"SF");
+    //             break;
+    //     }
+
+    //     printf("%s \t->\t %p\n",name,agent.ubpf_fn[i]);
+    // }
+    // printf("Program installed for SF%d\n",request->index);
+
     install_request__free_unpacked(request, NULL);
+
+    // Send a InstallReply
+    InstallReply reply = INSTALL_REPLY__INIT;
+    
+    if(err != 0 || ebpfprog == NULL){
+        reply.status = INSTALL_REPLY__STATUS__FAIL;
+    }else{
+        reply.status = INSTALL_REPLY__STATUS__OK;
+    }
+
+    int packet_len = install_reply__get_packed_size(&reply);
+
+    Header replyHdr = HEADER__INIT;
+    replyHdr.type = HEADER__TYPE__INSTALL_REPLY;
+    replyHdr.length = packet_len;
+
+    int hdr_len = header__get_packed_size(&replyHdr);
+    void* buf = malloc(hdr_len + packet_len);
+
+    header__pack(&replyHdr,buf);
+    install_reply__pack(&reply,buf+hdr_len);
+
+    send(agent.fd,buf,packet_len+hdr_len,MSG_NOSIGNAL);
+    
     return len;
 }
 
@@ -140,7 +235,7 @@ int recv_tables_list_request(void *buffer, Header *header) {
     char table_name[32] = {0};
     struct table_entry *tab_entry;
 
-    int tables = ubpf_get_tables(vm);
+    int tables = ubpf_get_tables(vm[request->index]);
     while (bpf_get_next_key(tables, table_name, table_name) == 0) {
         bpf_lookup_elem(tables, table_name, &tab_entry);
 
@@ -205,7 +300,7 @@ int recv_table_list_request(void *buffer, Header *header) {
     strncpy(table_name, request->table_name, 31);
     struct table_entry *tab_entry;
 
-    int tables = ubpf_get_tables(vm);
+    int tables = ubpf_get_tables(vm[request->index]);
     int ret = bpf_lookup_elem(tables, table_name, &tab_entry);
 
     TableDefinition tableEntry = TABLE_DEFINITION__INIT;
@@ -296,7 +391,7 @@ int recv_table_entry_get_request(void *buffer, Header *header) {
     char table_name[32] = {0};
     strncpy(table_name, request->table_name, 31);
     struct table_entry *tab_entry;
-    int tables = ubpf_get_tables(vm);
+    int tables = ubpf_get_tables(vm[request->index]);
     int ret = bpf_lookup_elem(tables, table_name, &tab_entry);
 
     if (ret == -1) {
@@ -347,7 +442,7 @@ int recv_table_entry_insert_request(void *buffer, Header *header) {
     char table_name[32] = {0};
     strncpy(table_name, request->table_name, 31);
     struct table_entry *tab_entry;
-    int tables = ubpf_get_tables(vm);
+    int tables = ubpf_get_tables(vm[request->index]);
     int ret = bpf_lookup_elem(tables, table_name, &tab_entry);
 
     if (ret == -1) {
@@ -387,7 +482,7 @@ int recv_table_entry_delete_request(void *buffer, Header *header) {
     char table_name[32] = {0};
     strncpy(table_name, request->table_name, 31);
     struct table_entry *tab_entry;
-    int tables = ubpf_get_tables(vm);
+    int tables = ubpf_get_tables(vm[request->index]);
     int ret = bpf_lookup_elem(tables, table_name, &tab_entry);
 
     if (ret == -1) {
@@ -527,6 +622,7 @@ void *agent_task()
     //
     uint8_t buf[8192]; // TODO should have a proper buffer that wraps around and expand if the message is bigger than this
     struct sockaddr_in saddr;
+    int i;
 
     //
     char *controller_address, *controller_ip, *controller_port;
@@ -542,15 +638,24 @@ void *agent_task()
         pthread_exit(NULL);
     }
 
-    //
-    vm = ubpf_create();
+    // Initialize all VMs
+    for(i = 0 ; i < MAX_FUNCS ; i++){
+        vm[i] = ubpf_create();
 
-    // Register the map functions
-    ubpf_register(vm, 1, "bpf_map_lookup_elem", bpf_lookup);
-    ubpf_register(vm, 2, "bpf_map_update_elem", bpf_update);
-    ubpf_register(vm, 3, "bpf_map_delete_elem", bpf_delete);
-    ubpf_register(vm, 31, "bpf_notify", bpf_notify);
-    ubpf_register(vm, 32, "bpf_debug", bpf_debug);
+        // Register the map functions
+        ubpf_register(vm[i], 1, "bpf_map_lookup_elem", bpf_lookup);
+        ubpf_register(vm[i], 2, "bpf_map_update_elem", bpf_update);
+        ubpf_register(vm[i], 3, "bpf_map_delete_elem", bpf_delete);
+        ubpf_register(vm[i], 31, "bpf_notify", bpf_notify);
+        ubpf_register(vm[i], 32, "bpf_debug", bpf_debug);
+        ubpf_register(vm[i], 5, "dump", hexDump);
+        ubpf_register(vm[i], 6, "printf", printf);
+        
+        // Register encapsulation functions
+        ubpf_register(vm[i], 41, "bpf_pop_header", agent.pop_header);
+        ubpf_register(vm[i], 42, "bpf_push_header", agent.push_header);
+
+    }
 
     while (likely(!sigint)) {
         // Connect to the controller
@@ -610,7 +715,7 @@ void *agent_task()
     pthread_exit(NULL);
 }
 
-int agent_start(ubpf_jit_fn *ubpf_fn, tx_packet_fn tx_fn, struct agent_options *opts)
+int agent_start(ubpf_jit_fn *ubpf_fn, tx_packet_fn tx_fn, pop_header_fn pop_fn, push_header_fn push_fn, struct agent_options *opts)
 {
     int err;
     pthread_t agent_thread;
@@ -618,6 +723,8 @@ int agent_start(ubpf_jit_fn *ubpf_fn, tx_packet_fn tx_fn, struct agent_options *
     agent.ubpf_fn = ubpf_fn;
     agent.transmit = tx_fn;
     agent.options = opts;
+    agent.pop_header = pop_fn;
+    agent.push_header = push_fn;
 
     err = pthread_create(&agent_thread, NULL, agent_task, NULL);
     return err;

@@ -7,9 +7,10 @@ from protocol import eBPFFactory
 from packets import *
 
 class eBPFCoreApplication(object):
-    def __init__(self):
+    def __init__(self,port=9000):
         self.connections = {}
-        reactor.listenTCP(9000, eBPFFactory(self))
+        self.listenTo = port
+        reactor.listenTCP(self.listenTo, eBPFFactory(self))
 
     @set_event_handler('disconnect')
     def connection_closed(self, connection, reason):
